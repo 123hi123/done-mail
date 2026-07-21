@@ -114,12 +114,17 @@ async function runForwardAction(action: ForwardPolicyAction, payload: MailPolicy
   }
 }
 
-function trimTelegramMessage(message: string) {
+export function trimTelegramMessage(message: string) {
   if (message.length <= MAX_TELEGRAM_MESSAGE_LENGTH) return message;
   return `${message.slice(0, MAX_TELEGRAM_MESSAGE_LENGTH - 1)}…`;
 }
 
-async function telegramRequest(botToken: string, method: 'sendMessage' | 'sendDocument', body: FormData | Record<string, unknown>) {
+export interface TelegramTransport {
+  botToken: string;
+  chatIds: string[];
+}
+
+export async function telegramRequest(botToken: string, method: string, body: FormData | Record<string, unknown>) {
   const init: RequestInit =
     body instanceof FormData
       ? { method: 'POST', body }
@@ -135,10 +140,11 @@ async function telegramRequest(botToken: string, method: 'sendMessage' | 'sendDo
       ...init,
       signal: controller.signal
     });
-    const data = (await response.json().catch(() => null)) as { ok?: boolean; description?: string } | null;
+    const data = (await response.json().catch(() => null)) as { ok?: boolean; description?: string; result?: unknown } | null;
     if (!response.ok || data?.ok !== true) {
       throw new Error(data?.description || `Telegram 请求失败：${response.status}`);
     }
+    return data.result;
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') {
       throw new Error(`Telegram 请求超时：${TELEGRAM_TIMEOUT_MS / 1000} 秒`);
@@ -155,7 +161,7 @@ function telegramMailButton(shareUrl: string) {
   };
 }
 
-async function sendTelegramMessage(action: TelegramPolicyAction, message: string, shareUrl?: string) {
+export async function sendTelegramMessage(action: TelegramTransport, message: string, shareUrl?: string) {
   await Promise.all(
     action.chatIds.map((chatId) =>
       telegramRequest(action.botToken, 'sendMessage', {
@@ -187,14 +193,14 @@ async function telegramAttachmentRows(env: Env, mailId: string) {
   }));
 }
 
-async function sendTelegramDocument(action: TelegramPolicyAction, chatId: string, file: File) {
+export async function sendTelegramDocument(action: TelegramTransport, chatId: string, file: File) {
   const form = new FormData();
   form.set('chat_id', chatId);
   form.set('document', file);
   await telegramRequest(action.botToken, 'sendDocument', form);
 }
 
-async function sendTelegramAttachments(env: Env, action: TelegramPolicyAction, payload: MailPolicyPayload) {
+export async function sendTelegramAttachments(env: Env, action: TelegramTransport, payload: Pick<MailPolicyPayload, 'id' | 'hasAttachments'>) {
   if (!env.MAIL_BUCKET || !payload.hasAttachments) return { sent: 0, skipped: 0 };
   let sent = 0;
   const rows = await telegramAttachmentRows(env, payload.id);

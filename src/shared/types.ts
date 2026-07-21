@@ -38,16 +38,33 @@ export interface SystemConfig {
   rateLimit: RateLimitConfig;
 }
 
+export interface TelegramConfig {
+  enabled: boolean;
+  botToken: string;
+  chatIds: string[];
+  webhookSecret: string;
+}
+
+export interface PublicTelegramConfig {
+  enabled: boolean;
+  chatIds: string[];
+  botTokenConfigured: boolean;
+  botTokenMasked: string;
+  webhookConfigured: boolean;
+}
+
 export interface AppConfig {
   cloudflare: CloudflareConfig;
   system: SystemConfig;
   resend: ResendConfig;
+  telegram: TelegramConfig;
 }
 
 export interface SettingsState {
   cloudflare: PublicCloudflareConfig;
   system: SystemConfig;
   resend: PublicResendConfig;
+  telegram: PublicTelegramConfig;
 }
 
 export interface SendSettings {

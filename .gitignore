@@ -46,3 +46,7 @@ logs/
 
 # Local brand source files
 assets/brand/logo-source.png
+
+dist/
+wrangler-live*.toml
+.dev.vars

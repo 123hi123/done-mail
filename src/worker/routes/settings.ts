@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { buildSettingsUpdate, getCloudflareConfig, getPublicSettings, saveSettingsUpdate } from '../config';
 import { CloudflareService } from '../cloudflare';
 import { createForwardAddress, listForwardAddressStatuses, normalizeForwardAddressList } from '../forward-addresses';
+import { bindTelegramWebhook, sendTelegramTestMessage } from '../telegram';
 import type { Env } from '../types';
 import { apiOk, jsonFail } from '../utils';
 
@@ -25,6 +26,23 @@ settingsRoutes.post('/test-cloudflare', async (c) => {
   const accountId = String(cloudflare.accountId || current.accountId || '').trim();
   const service = CloudflareService.fromToken(apiToken, accountId);
   return apiOk(c, await service.inspect());
+});
+
+settingsRoutes.post('/test-telegram', async (c) => {
+  try {
+    return apiOk(c, await sendTelegramTestMessage(c.env));
+  } catch (error) {
+    return jsonFail(c, error instanceof Error ? error.message : 'Telegram 测试失败', 400, 'telegram_test_failed');
+  }
+});
+
+settingsRoutes.post('/bind-telegram-webhook', async (c) => {
+  try {
+    const origin = new URL(c.req.url).origin;
+    return apiOk(c, await bindTelegramWebhook(c.env, origin));
+  } catch (error) {
+    return jsonFail(c, error instanceof Error ? error.message : 'Webhook 绑定失败', 400, 'telegram_bind_failed');
+  }
 });
 
 settingsRoutes.get('/entry-origins', async (c) => {

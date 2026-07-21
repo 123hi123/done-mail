@@ -14,6 +14,9 @@ const settingsLoaded = ref(false);
 const mailboxSaving = ref(false);
 const maintenanceSaving = ref(false);
 const rateLimitSaving = ref(false);
+const telegramSaving = ref(false);
+const telegramTesting = ref(false);
+const telegramBinding = ref(false);
 const cloudflareTokenSaving = ref(false);
 const accountOptions = ref<CloudflareAccountOption[]>([]);
 const workerOptions = ref<CloudflareWorkerOption[]>([]);
@@ -43,6 +46,14 @@ const form = reactive({
     apiKey: '',
     apiKeyConfigured: false,
     apiKeyMasked: ''
+  },
+  telegram: {
+    enabled: false,
+    botToken: '',
+    chatIds: '',
+    botTokenConfigured: false,
+    botTokenMasked: '',
+    webhookConfigured: false
   },
   system: {
     cleanupEnabled: true,
@@ -209,6 +220,13 @@ function applySettings(data: SettingsState) {
   cloudflareErrorMessage.value = '';
   Object.assign(form.cloudflare, data.cloudflare);
   Object.assign(form.resend, data.resend);
+  if (data.telegram) {
+    form.telegram.enabled = data.telegram.enabled;
+    form.telegram.chatIds = (data.telegram.chatIds || []).join('\n');
+    form.telegram.botTokenConfigured = data.telegram.botTokenConfigured;
+    form.telegram.botTokenMasked = data.telegram.botTokenMasked;
+    form.telegram.webhookConfigured = data.telegram.webhookConfigured;
+  }
   assignSystemConfig(data.system);
   seedCloudflareOptions();
   seedEntryOriginOptions();
@@ -273,6 +291,56 @@ async function saveMailboxCapabilitySettings() {
   }, '邮箱配置已保存', '邮箱配置保存失败', () => {
     form.resend.apiKey = '';
   });
+}
+
+function telegramChatIdList() {
+  return form.telegram.chatIds.split(/[\s,;]+/).map((item) => item.trim()).filter(Boolean);
+}
+
+async function saveTelegramSettings() {
+  if (form.telegram.enabled && !form.telegram.botToken.trim() && !form.telegram.botTokenConfigured) {
+    ElMessage.error('请填写 Telegram Bot Token');
+    return;
+  }
+  if (form.telegram.enabled && !telegramChatIdList().length) {
+    ElMessage.error('请填写至少一个 Chat ID');
+    return;
+  }
+
+  await saveSettingsPatch(telegramSaving, {
+    telegram: {
+      enabled: form.telegram.enabled,
+      botToken: form.telegram.botToken,
+      chatIds: telegramChatIdList()
+    }
+  }, 'Telegram 配置已保存', 'Telegram 配置保存失败', () => {
+    form.telegram.botToken = '';
+  });
+}
+
+async function testTelegramPush() {
+  telegramTesting.value = true;
+  try {
+    await endpoints.testTelegram();
+    ElMessage.success('测试消息已发送，请检查 Telegram');
+  } catch (error) {
+    ElMessage.error(apiErrorMessage(error, 'Telegram 测试失败'));
+  } finally {
+    telegramTesting.value = false;
+  }
+}
+
+async function bindTelegramWebhookAction() {
+  telegramBinding.value = true;
+  try {
+    const data = await endpoints.bindTelegramWebhook();
+    form.telegram.webhookConfigured = true;
+    ElMessage.success(`指令 Webhook 已绑定：${data.url}`);
+  } catch (error) {
+    ElMessage.error(apiErrorMessage(error, 'Webhook 绑定失败'));
+  } finally {
+    telegramBinding.value = false;
+  }
 }
 
 async function saveMailMaintenanceSettings() {
@@ -608,6 +676,51 @@ usePageRefresh(() => loadSettings(true));
               <span>Resend Key</span>
               <el-input v-model.trim="form.resend.apiKey" type="password" show-password :disabled="!form.resend.enabled" :placeholder="form.resend.apiKeyConfigured ? form.resend.apiKeyMasked : '填写 Resend API Key'" autocomplete="off" />
             </label>
+          </div>
+        </div>
+      </section>
+
+      <section class="mc-settings-card">
+        <div class="mc-settings-card-head">
+          <div class="mc-heading-line">
+            <h3>Telegram 转发</h3>
+            <span v-if="form.telegram.enabled && form.telegram.botTokenConfigured" class="mc-heading-status-dot ok"></span>
+          </div>
+          <button type="button" class="mc-action-primary" :disabled="telegramSaving" @click="saveTelegramSettings">
+            <span v-if="telegramSaving" class="mc-button-spinner"></span>
+            {{ telegramSaving ? '保存中' : '保存' }}
+          </button>
+        </div>
+        <div class="mc-settings-card-body mc-settings-card-body--rows">
+          <div class="mc-settings-row">
+            <div class="mc-settings-switch-field">
+              <span>收信转发到 TG</span>
+              <el-switch v-model="form.telegram.enabled" />
+            </div>
+            <label class="mc-settings-field">
+              <span>Bot Token</span>
+              <el-input v-model.trim="form.telegram.botToken" type="password" show-password :placeholder="form.telegram.botTokenConfigured ? form.telegram.botTokenMasked : '填写 Bot Token'" autocomplete="off" />
+            </label>
+          </div>
+          <div class="mc-settings-row">
+            <label class="mc-settings-field mc-settings-field--fill">
+              <span>Chat ID（多个用换行 / 逗号分隔）</span>
+              <el-input v-model="form.telegram.chatIds" type="textarea" :rows="2" placeholder="例如 123456789" />
+            </label>
+          </div>
+          <div class="mc-settings-row">
+            <div class="mc-settings-field">
+              <button type="button" class="mc-action-secondary" :disabled="telegramTesting || !form.telegram.botTokenConfigured" @click="testTelegramPush">
+                <span v-if="telegramTesting" class="mc-button-spinner"></span>
+                {{ telegramTesting ? '发送中' : '测试推送' }}
+              </button>
+            </div>
+            <div class="mc-settings-field">
+              <button type="button" class="mc-action-secondary" :disabled="telegramBinding || !form.telegram.botTokenConfigured" @click="bindTelegramWebhookAction">
+                <span v-if="telegramBinding" class="mc-button-spinner"></span>
+                {{ telegramBinding ? '绑定中' : (form.telegram.webhookConfigured ? '重新绑定指令 Webhook' : '绑定指令 Webhook') }}
+              </button>
+            </div>
           </div>
         </div>
       </section>

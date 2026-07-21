@@ -89,6 +89,8 @@ export const endpoints = {
   saveSettings: async (payload: Record<string, unknown>) => result(await api.put<ApiResponse<SettingsState>>('/settings', payload)),
   entryOrigins: async () => result(await api.get<ApiResponse<EntryOriginOption[]>>('/settings/entry-origins')),
   testCloudflare: async (payload: Record<string, unknown>) => result(await api.post<ApiResponse<CloudflareInspectResult>>('/settings/test-cloudflare', payload)),
+  testTelegram: async () => result(await api.post<ApiResponse<{ sent: number }>>('/settings/test-telegram', {})),
+  bindTelegramWebhook: async () => result(await api.post<ApiResponse<{ url: string }>>('/settings/bind-telegram-webhook', {})),
   sendMail: async (payload: SendMailPayload) => result(await api.post<ApiResponse<{ id: string; resendId?: string }>>('/send', payload)),
 
   mails: async (params: Record<string, unknown>) => pageResult(await api.get<ApiResponse<MailRow[]>>('/mails', { params })),

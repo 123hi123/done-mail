@@ -76,7 +76,9 @@ export default {
       return env.ASSETS.fetch(req);
     }
 
-    if (!(await originAllowed(req, env, url))) return notFound();
+    // Telegram 伺服器回調來源與 adminBaseUrl 不同源，靠路由內 secret header 驗證
+    const isTelegramWebhook = req.method === 'POST' && url.pathname === '/api/telegram/webhook';
+    if (!isTelegramWebhook && !(await originAllowed(req, env, url))) return notFound();
 
     if (url.pathname.startsWith('/api/')) {
       if (url.pathname !== '/api/health' && !(await apiReadyOrScheduleMigration(env, ctx))) {

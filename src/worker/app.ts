@@ -12,6 +12,7 @@ import mailsRoutes, { publicMailsRoutes } from './routes/mails';
 import policyRoutes from './routes/policies';
 import sendRoutes, { publicSendRoutes } from './routes/send';
 import settingsRoutes from './routes/settings';
+import telegramRoutes from './routes/telegram';
 import type { Env } from './types';
 import { apiFail } from './utils';
 
@@ -46,7 +47,7 @@ app.use('/api/internal/*', async (c, next) => {
 });
 
 app.use('/api/*', async (c, next) => {
-  if (c.req.path === '/api/health' || c.req.path.startsWith('/api/internal/')) {
+  if (c.req.path === '/api/health' || c.req.path === '/api/telegram/webhook' || c.req.path.startsWith('/api/internal/')) {
     return next();
   }
 
@@ -93,6 +94,7 @@ app.route('/api/internal/settings', settingsRoutes);
 app.route('/api/internal/policies', policyRoutes);
 app.route('/api/internal/logs', logRoutes);
 
+app.route('/api/telegram', telegramRoutes);
 app.route('/api/mails', publicMailsRoutes);
 app.route('/api', publicSendRoutes);
 

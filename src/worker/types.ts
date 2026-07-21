@@ -34,6 +34,7 @@ export type {
   PublicMailPolicy,
   PublicPolicyAction,
   PublicResendConfig,
+  PublicTelegramConfig,
   PublicTelegramPolicyAction,
   RateLimitConfig,
   ResendConfig,
@@ -44,6 +45,7 @@ export type {
   SettingsState,
   SetupResult,
   SystemConfig,
+  TelegramConfig,
   TelegramPolicyAction,
   ZoneInfo
 } from '../shared/types';

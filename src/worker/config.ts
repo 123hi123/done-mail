@@ -1,10 +1,11 @@
 import { readAdminKeyConfig } from './auth';
-import type { AppConfig, CloudflareConfig, Env, PublicCloudflareConfig, PublicResendConfig, ResendConfig, SystemConfig } from './types';
-import { maskSecret, safeJsonParse } from './utils';
+import type { AppConfig, CloudflareConfig, Env, PublicCloudflareConfig, PublicResendConfig, PublicTelegramConfig, ResendConfig, SystemConfig, TelegramConfig } from './types';
+import { createId, maskSecret, safeJsonParse } from './utils';
 
 const CLOUDFLARE_KEY = 'config:cloudflare';
 const SYSTEM_KEY = 'config:system';
 const RESEND_KEY = 'config:resend';
+const TELEGRAM_KEY = 'config:telegram';
 const configCacheTtlMs = 5000;
 
 const defaultCloudflare: CloudflareConfig = {
@@ -32,6 +33,13 @@ const defaultResend: ResendConfig = {
   apiKey: ''
 };
 
+const defaultTelegram: TelegramConfig = {
+  enabled: false,
+  botToken: '',
+  chatIds: [],
+  webhookSecret: ''
+};
+
 interface CacheEntry<T> {
   env: Env;
   expiresAt: number;
@@ -41,6 +49,7 @@ interface CacheEntry<T> {
 let cloudflareCache: CacheEntry<CloudflareConfig> | null = null;
 let systemCache: CacheEntry<SystemConfig> | null = null;
 let resendCache: CacheEntry<ResendConfig> | null = null;
+let telegramCache: CacheEntry<TelegramConfig> | null = null;
 let authCache: CacheEntry<Awaited<ReturnType<typeof readAdminKeyConfig>>> | null = null;
 
 function cacheValid<T>(entry: CacheEntry<T> | null, env: Env) {
@@ -55,6 +64,7 @@ export function clearConfigCache(env?: Env) {
   if (!env || cloudflareCache?.env === env) cloudflareCache = null;
   if (!env || systemCache?.env === env) systemCache = null;
   if (!env || resendCache?.env === env) resendCache = null;
+  if (!env || telegramCache?.env === env) telegramCache = null;
   if (!env || authCache?.env === env) authCache = null;
 }
 
@@ -142,6 +152,41 @@ export async function getResendConfig(env: Env): Promise<ResendConfig> {
   return value;
 }
 
+export function normalizeTelegramChatIds(input: unknown): string[] {
+  const raw = Array.isArray(input) ? input.map((item) => String(item)) : String(input || '').split(/[\s,;\n]+/);
+  const seen = new Set<string>();
+  const chatIds: string[] = [];
+  for (const item of raw) {
+    const chatId = item.trim();
+    if (!chatId || !/^-?\d+$/.test(chatId) || seen.has(chatId)) continue;
+    seen.add(chatId);
+    chatIds.push(chatId);
+  }
+  return chatIds;
+}
+
+export async function getTelegramConfig(env: Env): Promise<TelegramConfig> {
+  if (telegramCache?.env === env && telegramCache.expiresAt > Date.now()) return telegramCache.value;
+  const stored = safeJsonParse<TelegramConfig>(await env.KV.get(TELEGRAM_KEY), defaultTelegram);
+  const value: TelegramConfig = {
+    enabled: stored.enabled === true,
+    botToken: String(stored.botToken || '').trim(),
+    chatIds: normalizeTelegramChatIds(stored.chatIds),
+    webhookSecret: String(stored.webhookSecret || '').trim()
+  };
+  telegramCache = cacheEntry(env, value);
+  return value;
+}
+
+export async function ensureTelegramWebhookSecret(env: Env) {
+  const current = await getTelegramConfig(env);
+  if (current.webhookSecret) return current;
+  const next: TelegramConfig = { ...current, webhookSecret: createId().replace(/-/g, '') };
+  await env.KV.put(TELEGRAM_KEY, JSON.stringify(next));
+  clearConfigCache(env);
+  return next;
+}
+
 export async function getAuthConfig(env: Env) {
   if (authCache?.env === env && authCache.expiresAt > Date.now()) return authCache.value;
   const value = await readAdminKeyConfig(env);
@@ -150,13 +195,14 @@ export async function getAuthConfig(env: Env) {
 }
 
 export async function getAppConfig(env: Env): Promise<AppConfig> {
-  const [cloudflare, system, resend] = await Promise.all([
+  const [cloudflare, system, resend, telegram] = await Promise.all([
     getCloudflareConfig(env),
     getSystemConfig(env),
-    getResendConfig(env)
+    getResendConfig(env),
+    getTelegramConfig(env)
   ]);
 
-  return { cloudflare, system, resend };
+  return { cloudflare, system, resend, telegram };
 }
 
 export function toPublicCloudflareConfig(config: CloudflareConfig): PublicCloudflareConfig {
@@ -176,16 +222,30 @@ export function toPublicResendConfig(config: ResendConfig): PublicResendConfig {
   };
 }
 
+export function toPublicTelegramConfig(config: TelegramConfig): PublicTelegramConfig {
+  return {
+    enabled: config.enabled,
+    chatIds: config.chatIds,
+    botTokenConfigured: Boolean(config.botToken),
+    botTokenMasked: maskSecret(config.botToken),
+    webhookConfigured: Boolean(config.webhookSecret)
+  };
+}
+
 export async function getPublicSettings(env: Env) {
   const config = await getAppConfig(env);
   return {
     cloudflare: toPublicCloudflareConfig(config.cloudflare),
     system: config.system,
-    resend: toPublicResendConfig(config.resend)
+    resend: toPublicResendConfig(config.resend),
+    telegram: toPublicTelegramConfig(config.telegram)
   };
 }
 
-export async function buildSettingsUpdate(env: Env, input: Partial<AppConfig> & { cloudflare?: Partial<CloudflareConfig>; resend?: Partial<ResendConfig> }) {
+export async function buildSettingsUpdate(
+  env: Env,
+  input: Partial<AppConfig> & { cloudflare?: Partial<CloudflareConfig>; resend?: Partial<ResendConfig>; telegram?: Partial<TelegramConfig> }
+) {
   const current = await getAppConfig(env);
 
   const cloudflare: CloudflareConfig = {
@@ -219,20 +279,34 @@ export async function buildSettingsUpdate(env: Env, input: Partial<AppConfig> & 
     resend.apiKey = nextResendApiKey.trim();
   }
 
-  return { cloudflare, system, resend };
+  const telegram: TelegramConfig = {
+    enabled: input.telegram?.enabled === undefined ? current.telegram.enabled : input.telegram.enabled === true,
+    chatIds: input.telegram?.chatIds === undefined ? current.telegram.chatIds : normalizeTelegramChatIds(input.telegram.chatIds),
+    botToken: current.telegram.botToken,
+    webhookSecret: current.telegram.webhookSecret
+  };
+
+  const nextBotToken = input.telegram?.botToken;
+  if (typeof nextBotToken === 'string' && nextBotToken.trim()) {
+    telegram.botToken = nextBotToken.trim();
+  }
+
+  return { cloudflare, system, resend, telegram };
 }
 
 export async function saveSettingsUpdate(env: Env, config: AppConfig) {
   await Promise.all([
     env.KV.put(CLOUDFLARE_KEY, JSON.stringify(config.cloudflare)),
     env.KV.put(SYSTEM_KEY, JSON.stringify(config.system)),
-    env.KV.put(RESEND_KEY, JSON.stringify(config.resend))
+    env.KV.put(RESEND_KEY, JSON.stringify(config.resend)),
+    env.KV.put(TELEGRAM_KEY, JSON.stringify(config.telegram))
   ]);
   clearConfigCache(env);
 
   return {
     cloudflare: toPublicCloudflareConfig(config.cloudflare),
     system: config.system,
-    resend: toPublicResendConfig(config.resend)
+    resend: toPublicResendConfig(config.resend),
+    telegram: toPublicTelegramConfig(config.telegram)
   };
 }

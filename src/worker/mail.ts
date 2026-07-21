@@ -6,6 +6,7 @@ import { createMailShare, deleteMailShares } from './mail-share';
 import { runMailPolicies } from './policies';
 import { deleteR2Objects, deleteR2ObjectsBestEffort } from './r2';
 import { deleteSentMails } from './sent-mails';
+import { forwardMailToTelegram } from './telegram';
 import type { Env, MailPolicyMatchPayload, MailPolicyPayload } from './types';
 import { createId, extractDomain, nowIso, pickEmailAddress } from './utils';
 
@@ -604,6 +605,32 @@ export async function handleIncomingEmail(message: ForwardableEmailMessage, env:
     };
 
     let shareUrlPromise: Promise<string> | undefined;
+    const shareUrl = () => {
+      shareUrlPromise ||= createMailShare(env, mailId).then((share) => share.url);
+      return shareUrlPromise;
+    };
+
+    // 全局 Telegram 转发（config:telegram），与策略动作一样走后台执行，不阻塞收信
+    const telegramForward = forwardMailToTelegram(
+      env,
+      {
+        mailId,
+        subject: parsed.subject || '',
+        fromAddr,
+        fromName,
+        toAddr,
+        textBody: parsed.text || '',
+        htmlBody: parsed.html || '',
+        attachmentCount: attachmentData.length
+      },
+      shareUrl
+    ).catch((error) => console.error('Telegram 全局转发失败:', error));
+    if (ctx) {
+      ctx.waitUntil(telegramForward);
+    } else {
+      await telegramForward;
+    }
+
     await runMailPolicies(env, {
       env,
       matchPayload: buildPolicyMatchPayload({ ...policyBase, attachmentCount: attachmentData.length }),
@@ -613,10 +640,7 @@ export async function handleIncomingEmail(message: ForwardableEmailMessage, env:
           headers,
           attachments: attachmentData
         }),
-      shareUrl: () => {
-        shareUrlPromise ||= createMailShare(env, mailId).then((share) => share.url);
-        return shareUrlPromise;
-      },
+      shareUrl,
       forward: (to) => message.forward(to),
       executionCtx: ctx
     });
