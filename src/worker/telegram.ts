@@ -8,6 +8,21 @@ import { textFromHtml } from './mail-content';
 import { createMailShare } from './mail-share';
 import { sendTelegramAttachments, sendTelegramMessage, telegramRequest } from './policy-actions';
 import { escapeTelegramHtml } from './policy-template';
+import {
+  clearConvState,
+  getConvState,
+  setConvState,
+  tgAnswerCallback,
+  tgSend,
+  type ConvState
+} from './telegram-core';
+import {
+  handleBlockCallback,
+  handleBlockValueInput,
+  renderBlockHome,
+  renderBlockList,
+  toggleMarketingMute
+} from './telegram-block';
 import type { Env } from './types';
 
 // Telegram 單則訊息上限 4096，組裝時保守抓 3600 預留轉義膨脹空間
@@ -303,57 +318,14 @@ const HELP_MESSAGE = [
   '/newsub 前缀 [主域名] — 直接开通（快捷用法）',
   '/domains — 列出可用邮箱后缀',
   '/refresh 域名 — 重新验证域名状态',
+  '',
+  '/block — 封锁管理（营销静音开关 / 新增规则 / 移除）',
+  '/blocklist — 直接看封锁规则清单',
+  '/mute — 一键切换「营销邮件静音」',
+  '',
   '/cancel — 取消当前操作',
   '/help — 显示本说明'
 ].join('\n');
-
-// 對話狀態（選單流程跨訊息）暫存於 KV，10 分鐘過期
-const CONV_TTL_SECONDS = 600;
-
-interface ConvState {
-  step: 'awaiting_prefix';
-  zoneId: string;
-  zoneName: string;
-}
-
-function convKey(chatId: string) {
-  return `tg:conv:${chatId}`;
-}
-
-async function getConvState(env: Env, chatId: string): Promise<ConvState | null> {
-  const raw = await env.KV.get(convKey(chatId));
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw) as ConvState;
-  } catch {
-    return null;
-  }
-}
-
-async function setConvState(env: Env, chatId: string, state: ConvState) {
-  await env.KV.put(convKey(chatId), JSON.stringify(state), { expirationTtl: CONV_TTL_SECONDS });
-}
-
-async function clearConvState(env: Env, chatId: string) {
-  await env.KV.delete(convKey(chatId));
-}
-
-async function tgSend(botToken: string, chatId: string, text: string, replyMarkup?: unknown) {
-  await telegramRequest(botToken, 'sendMessage', {
-    chat_id: chatId,
-    text,
-    parse_mode: 'HTML',
-    disable_web_page_preview: true,
-    ...(replyMarkup ? { reply_markup: replyMarkup } : {})
-  });
-}
-
-async function tgAnswerCallback(botToken: string, callbackId: string, text?: string) {
-  await telegramRequest(botToken, 'answerCallbackQuery', {
-    callback_query_id: callbackId,
-    ...(text ? { text } : {})
-  }).catch((error) => console.error('answerCallbackQuery 失败:', error));
-}
 
 // /newsub 選單：列出帳號下所有 Cloudflare 主域名（✅=已接入、➕=選擇後自動接入）
 async function startNewSubMenu(env: Env, botToken: string, chatId: string, reply: (text: string) => Promise<void>) {
@@ -408,16 +380,23 @@ async function submitSubdomainPrefix(
 ) {
   const reply = (text: string) => tgSend(botToken, chatId, text);
   const prefix = rawPrefix.trim().toLowerCase().replace(/^\.+|\.+$/g, '');
+  const zoneId = conv.zoneId;
+  const zoneName = conv.zoneName;
+  if (!zoneId || !zoneName) {
+    await clearConvState(env, chatId);
+    await reply('流程已过期，请重新 /newsub。');
+    return;
+  }
   if (!prefix) {
     await reply('请输入有效的子域名前缀，或发送 /cancel 取消。');
     return;
   }
   await clearConvState(env, chatId);
-  await reply(`⏳ 正在开通 <code>${escapeTelegramHtml(`${prefix}.${conv.zoneName}`)}</code>…`);
+  await reply(`⏳ 正在开通 <code>${escapeTelegramHtml(`${prefix}.${zoneName}`)}</code>…`);
   waitUntil(
     (async () => {
       try {
-        const root = await ensureRootReady(env, conv.zoneId, conv.zoneName);
+        const root = await ensureRootReady(env, zoneId, zoneName);
         const result = await addSubdomains(env, root.id, [prefix]);
         const item = result.items[0];
         if (!item || !item.success || !item.record) {
@@ -535,6 +514,8 @@ export async function handleTelegramUpdate(env: Env, update: TelegramUpdate, wai
     try {
       if (data.startsWith('ns:')) {
         await handleNewSubSelection(env, config.botToken, cbChatId, data.slice(3));
+      } else if (data.startsWith('blk:')) {
+        await handleBlockCallback(env, config.botToken, cbChatId, data);
       }
     } catch (error) {
       console.error('Telegram 回调处理失败:', error);
@@ -556,9 +537,14 @@ export async function handleTelegramUpdate(env: Env, update: TelegramUpdate, wai
   const parsed = parseTelegramCommand(text);
 
   try {
+    const conv = await getConvState(env, chatId);
+    // 进行中的「输入封锁值」步骤优先于指令解析（值可能以 '/' 开头，如主旨关键字），只有 /cancel 可中断
+    if (conv?.step === 'block_value' && !(parsed && parsed.command === '/cancel')) {
+      await handleBlockValueInput(env, config.botToken, chatId, text, conv);
+      return;
+    }
     if (!parsed) {
       // 非指令：可能是选单流程中输入的子域名前缀
-      const conv = await getConvState(env, chatId);
       if (conv?.step === 'awaiting_prefix') {
         await submitSubdomainPrefix(env, config.botToken, chatId, text, conv, waitUntil);
       }
@@ -587,6 +573,17 @@ export async function handleTelegramUpdate(env: Env, update: TelegramUpdate, wai
       case '/refresh':
         await handleRefreshCommand(env, parsed.args, reply);
         break;
+      case '/block':
+      case '/blocklist':
+        if (parsed.command === '/blocklist') {
+          await renderBlockList(env, config.botToken, chatId);
+        } else {
+          await renderBlockHome(env, config.botToken, chatId);
+        }
+        break;
+      case '/mute':
+        await toggleMarketingMute(env, config.botToken, chatId);
+        break;
       default:
         await reply(`未知指令 ${escapeTelegramHtml(parsed.command)}\n\n${HELP_MESSAGE}`);
         break;
@@ -613,6 +610,9 @@ export async function bindTelegramWebhook(env: Env, origin: string) {
     commands: [
       { command: 'newsub', description: '开通子域名收信' },
       { command: 'domains', description: '列出可用邮箱后缀' },
+      { command: 'block', description: '封锁管理 / 营销静音' },
+      { command: 'blocklist', description: '查看封锁规则' },
+      { command: 'mute', description: '切换营销邮件静音' },
       { command: 'refresh', description: '重新验证域名状态' },
       { command: 'help', description: '指令说明' }
     ]

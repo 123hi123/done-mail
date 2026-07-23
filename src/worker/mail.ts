@@ -1,12 +1,13 @@
 import PostalMime from 'postal-mime';
-import { getSystemConfig } from './config';
+import { evaluateBlock } from './blocklist';
+import { getBlocklistConfig, getSystemConfig } from './config';
 import { fileContentDisposition } from './http/content-disposition';
 import { buildBodyPreview, buildMailBodyChunks, buildMailContentSearchChunks, buildMailSearchFields, sanitizeMailHtml } from './mail-content';
 import { createMailShare, deleteMailShares } from './mail-share';
 import { runMailPolicies } from './policies';
 import { deleteR2Objects, deleteR2ObjectsBestEffort } from './r2';
 import { deleteSentMails } from './sent-mails';
-import { forwardMailToTelegram } from './telegram';
+import { extractClaudeMagicLink, forwardMailToTelegram } from './telegram';
 import type { Env, MailPolicyMatchPayload, MailPolicyPayload } from './types';
 import { createId, extractDomain, nowIso, pickEmailAddress } from './utils';
 
@@ -610,25 +611,49 @@ export async function handleIncomingEmail(message: ForwardableEmailMessage, env:
       return shareUrlPromise;
     };
 
-    // 全局 Telegram 转发（config:telegram），与策略动作一样走后台执行，不阻塞收信
-    const telegramForward = forwardMailToTelegram(
-      env,
-      {
-        mailId,
-        subject: parsed.subject || '',
+    // 封锁清单（config:blocklist）：命中营销静音或规则的信不推 TG（信照存，后台可见）。
+    // 读取失败一律 fail-open（照转发），确保这条在存档后绝不抛出、不影响收信/重投。
+    let blockDecision: { blocked: boolean; reason?: string } = { blocked: false };
+    try {
+      blockDecision = evaluateBlock(await getBlocklistConfig(env), {
         fromAddr,
         fromName,
+        subject: parsed.subject || '',
         toAddr,
-        textBody: parsed.text || '',
-        htmlBody: parsed.html || '',
-        attachmentCount: attachmentData.length
-      },
-      shareUrl
-    ).catch((error) => console.error('Telegram 全局转发失败:', error));
-    if (ctx) {
-      ctx.waitUntil(telegramForward);
+        headers
+      });
+    } catch (error) {
+      console.error('读取封锁清单失败，放行本封邮件转发:', error);
+    }
+
+    // 保护本服务核心用途：营销静音误判时，含 Claude magic link 的信仍照推（用户明确要求）
+    if (blockDecision.blocked && blockDecision.reason === 'marketing' && extractClaudeMagicLink(parsed.text || '', parsed.html || '')) {
+      blockDecision = { blocked: false };
+    }
+
+    if (blockDecision.blocked) {
+      console.log(`封锁不推 TG（${blockDecision.reason}）from=${fromAddr} to=${toAddr}`);
     } else {
-      await telegramForward;
+      // 全局 Telegram 转发（config:telegram），与策略动作一样走后台执行，不阻塞收信
+      const telegramForward = forwardMailToTelegram(
+        env,
+        {
+          mailId,
+          subject: parsed.subject || '',
+          fromAddr,
+          fromName,
+          toAddr,
+          textBody: parsed.text || '',
+          htmlBody: parsed.html || '',
+          attachmentCount: attachmentData.length
+        },
+        shareUrl
+      ).catch((error) => console.error('Telegram 全局转发失败:', error));
+      if (ctx) {
+        ctx.waitUntil(telegramForward);
+      } else {
+        await telegramForward;
+      }
     }
 
     await runMailPolicies(env, {

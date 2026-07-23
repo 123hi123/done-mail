@@ -53,6 +53,20 @@ export interface PublicTelegramConfig {
   webhookConfigured: boolean;
 }
 
+export interface BlockRule {
+  id: string;
+  type: 'sender' | 'domain' | 'subject' | 'fromName';
+  value: string;
+  scope: 'global' | 'recipient';
+  recipient?: string;
+  createdAt: string;
+}
+
+export interface BlocklistConfig {
+  muteMarketing: boolean;
+  rules: BlockRule[];
+}
+
 export interface AppConfig {
   cloudflare: CloudflareConfig;
   system: SystemConfig;

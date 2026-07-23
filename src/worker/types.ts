@@ -1,5 +1,7 @@
 export type {
   AppConfig,
+  BlocklistConfig,
+  BlockRule,
   BodyType,
   CloudflareAccountInfo,
   CloudflareConfig,

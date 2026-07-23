@@ -1,5 +1,5 @@
 import { readAdminKeyConfig } from './auth';
-import type { AppConfig, CloudflareConfig, Env, PublicCloudflareConfig, PublicResendConfig, PublicTelegramConfig, ResendConfig, SystemConfig, TelegramConfig } from './types';
+import type { AppConfig, BlocklistConfig, CloudflareConfig, Env, PublicCloudflareConfig, PublicResendConfig, PublicTelegramConfig, ResendConfig, SystemConfig, TelegramConfig } from './types';
 import { createId, maskSecret, safeJsonParse } from './utils';
 
 const CLOUDFLARE_KEY = 'config:cloudflare';
@@ -7,7 +7,13 @@ const SYSTEM_KEY = 'config:system';
 const RESEND_KEY = 'config:resend';
 const TELEGRAM_KEY = 'config:telegram';
 const API_TOKEN_KEY = 'config:api_token';
+const BLOCKLIST_KEY = 'config:blocklist';
 const configCacheTtlMs = 5000;
+
+const defaultBlocklist: BlocklistConfig = {
+  muteMarketing: true,
+  rules: []
+};
 
 const defaultCloudflare: CloudflareConfig = {
   accountId: '',
@@ -52,6 +58,7 @@ let systemCache: CacheEntry<SystemConfig> | null = null;
 let resendCache: CacheEntry<ResendConfig> | null = null;
 let telegramCache: CacheEntry<TelegramConfig> | null = null;
 let apiTokenCache: CacheEntry<string> | null = null;
+let blocklistCache: CacheEntry<BlocklistConfig> | null = null;
 let authCache: CacheEntry<Awaited<ReturnType<typeof readAdminKeyConfig>>> | null = null;
 
 function cacheValid<T>(entry: CacheEntry<T> | null, env: Env) {
@@ -68,7 +75,38 @@ export function clearConfigCache(env?: Env) {
   if (!env || resendCache?.env === env) resendCache = null;
   if (!env || telegramCache?.env === env) telegramCache = null;
   if (!env || apiTokenCache?.env === env) apiTokenCache = null;
+  if (!env || blocklistCache?.env === env) blocklistCache = null;
   if (!env || authCache?.env === env) authCache = null;
+}
+
+// 封鎖清單（存 KV config:blocklist，收信时读一次、5 秒缓存）
+export async function getBlocklistConfig(env: Env): Promise<BlocklistConfig> {
+  if (blocklistCache?.env === env && blocklistCache.expiresAt > Date.now()) return blocklistCache.value;
+  const stored = safeJsonParse<BlocklistConfig>(await env.KV.get(BLOCKLIST_KEY), defaultBlocklist);
+  const value: BlocklistConfig = {
+    muteMarketing: stored.muteMarketing === undefined ? defaultBlocklist.muteMarketing : stored.muteMarketing === true,
+    // 複製陣列，避免 KV 缺值時回傳的 defaultBlocklist.rules 被呼叫端就地 push 污染
+    rules: Array.isArray(stored.rules) ? [...stored.rules] : []
+  };
+  blocklistCache = cacheEntry(env, value);
+  return value;
+}
+
+export async function saveBlocklistConfig(env: Env, config: BlocklistConfig) {
+  const normalized: BlocklistConfig = {
+    muteMarketing: config.muteMarketing === true,
+    rules: Array.isArray(config.rules) ? [...config.rules] : []
+  };
+  try {
+    await env.KV.put(BLOCKLIST_KEY, JSON.stringify(normalized));
+    // 用剛寫入的值填快取：同一請求內立即重讀就不會撞上 KV 最終一致性的舊值
+    blocklistCache = cacheEntry(env, normalized);
+  } catch (error) {
+    // 寫入失敗：清掉快取，別讓未落地的變更留在記憶體影響收信判斷
+    if (blocklistCache?.env === env) blocklistCache = null;
+    throw error;
+  }
+  return normalized;
 }
 
 // 公开 API 专用 token（存 KV config:api_token，纯字串），与 admin 登入 key 分离、可随时更换
