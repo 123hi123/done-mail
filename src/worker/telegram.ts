@@ -1,8 +1,9 @@
 import { ensureTelegramWebhookSecret, getTelegramConfig } from './config';
 import { getDomainById } from './domain-common';
+import { ensureRootReady, listDomainRows, type DomainNameRow } from './domain-onboard';
 import { listCloudflareZones } from './domain-query';
 import { refreshDomain } from './domain-refresh';
-import { addDomains, addSubdomains, runDomainSetup } from './domain-setup';
+import { addSubdomains, runDomainSetup } from './domain-setup';
 import { textFromHtml } from './mail-content';
 import { createMailShare } from './mail-share';
 import { sendTelegramAttachments, sendTelegramMessage, telegramRequest } from './policy-actions';
@@ -268,22 +269,7 @@ export async function forwardMailToTelegram(env: Env, mail: TelegramMailInput, g
   }
 }
 
-interface DomainSuffixRow {
-  id: string;
-  name: string;
-  is_subdomain: number;
-  setup_status: string;
-  last_error: string | null;
-}
-
-async function listDomainRows(env: Env) {
-  const rows = await env.DB.prepare(
-    `SELECT id, name, is_subdomain, setup_status, last_error FROM domains ORDER BY is_subdomain ASC, name ASC`
-  ).all<DomainSuffixRow>();
-  return rows.results || [];
-}
-
-function buildDomainListMessage(rows: DomainSuffixRow[]) {
+function buildDomainListMessage(rows: DomainNameRow[]) {
   if (!rows.length) {
     return '📮 目前尚未添加任何域名。\n请先在后台「域名」页添加主域名，或用 /newsub 开通子域名。';
   }
@@ -367,29 +353,6 @@ async function tgAnswerCallback(botToken: string, callbackId: string, text?: str
     callback_query_id: callbackId,
     ...(text ? { text } : {})
   }).catch((error) => console.error('answerCallbackQuery 失败:', error));
-}
-
-async function findRootByName(env: Env, name: string) {
-  return env.DB.prepare(`SELECT id, name, setup_status FROM domains WHERE name = ? AND is_subdomain = 0`)
-    .bind(name)
-    .first<{ id: string; name: string; setup_status: string }>();
-}
-
-// 主動把 Cloudflare 主域名接入服務：不存在則新增並設定 catch-all 指向本 worker；已存在但未就緒則重跑設定
-async function ensureRootReady(env: Env, zoneId: string, zoneName: string) {
-  let root = await findRootByName(env, zoneName);
-  if (!root) {
-    const result = await addDomains(env, [{ id: zoneId, name: zoneName }]);
-    const record = result.items.find((item) => item.record)?.record;
-    if (!record) throw new Error(result.items[0]?.error || '主域名添加失败');
-    await runDomainSetup(env, [record.id], false);
-    root = await findRootByName(env, zoneName);
-  } else if (root.setup_status !== 'ready') {
-    await runDomainSetup(env, [root.id], false);
-    root = await findRootByName(env, zoneName);
-  }
-  if (!root) throw new Error('主域名接入失败');
-  return root;
 }
 
 // /newsub 選單：列出帳號下所有 Cloudflare 主域名（✅=已接入、➕=選擇後自動接入）
@@ -489,7 +452,7 @@ async function handleNewSubCommand(env: Env, args: string[], reply: (text: strin
   }
 
   const parentArg = (args[1] || '').trim().toLowerCase();
-  let parent: DomainSuffixRow | undefined;
+  let parent: DomainNameRow | undefined;
   let prefix = input;
 
   if (parentArg) {

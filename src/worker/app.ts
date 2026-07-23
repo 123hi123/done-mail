@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { authStateFromConfig, normalizeAdminKey, verifyAdminKeyConfig } from './auth';
-import { getAuthConfig, getSystemConfig } from './config';
+import { getApiToken, getAuthConfig, getSystemConfig } from './config';
 import { hasValidCookieSession } from './http/auth';
 import { publicFail, publicOk } from './http/public-response';
 import { consumeRateLimit, rateLimitIdentity } from './http/rate-limit';
@@ -13,8 +13,22 @@ import policyRoutes from './routes/policies';
 import sendRoutes, { publicSendRoutes } from './routes/send';
 import settingsRoutes from './routes/settings';
 import telegramRoutes from './routes/telegram';
+import publicDomainsRoutes from './routes/domains-public';
 import type { Env } from './types';
 import { apiFail } from './utils';
+
+// 常數時間比較，避免 API token 比對被計時攻擊
+function safeEqual(a: string, b: string) {
+  if (!a || !b || a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i += 1) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+function bearerToken(header: string | undefined) {
+  const value = String(header || '').trim();
+  return /^Bearer\s+/i.test(value) ? value.replace(/^Bearer\s+/i, '').trim() : '';
+}
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -57,8 +71,17 @@ app.use('/api/*', async (c, next) => {
     return publicFail(c, '系统尚未初始化', 428, 'SETUP_REQUIRED');
   }
 
-  const adminKeyValid = await verifyAdminKeyConfig(authConfig, normalizeAdminKey(c.req.header('X-Admin-Key')));
-  if (!adminKeyValid) {
+  const providedAdminKey = normalizeAdminKey(c.req.header('X-Admin-Key'));
+  let authorized = await verifyAdminKeyConfig(authConfig, providedAdminKey);
+  if (!authorized) {
+    // 也接受公开 API 专用 token（X-Api-Token / X-Admin-Key / Authorization: Bearer）
+    const apiToken = await getApiToken(c.env);
+    if (apiToken) {
+      const provided = normalizeAdminKey(c.req.header('X-Api-Token')) || providedAdminKey || bearerToken(c.req.header('Authorization'));
+      authorized = safeEqual(provided, apiToken);
+    }
+  }
+  if (!authorized) {
     const system = await getSystemConfig(c.env);
     const limited = await consumeRateLimit(c.env, 'publicApi', rateLimitIdentity(c), system.rateLimit.publicApi);
     if (limited) {
@@ -95,6 +118,7 @@ app.route('/api/internal/policies', policyRoutes);
 app.route('/api/internal/logs', logRoutes);
 
 app.route('/api/telegram', telegramRoutes);
+app.route('/api/domains', publicDomainsRoutes);
 app.route('/api/mails', publicMailsRoutes);
 app.route('/api', publicSendRoutes);
 

@@ -6,6 +6,7 @@ const CLOUDFLARE_KEY = 'config:cloudflare';
 const SYSTEM_KEY = 'config:system';
 const RESEND_KEY = 'config:resend';
 const TELEGRAM_KEY = 'config:telegram';
+const API_TOKEN_KEY = 'config:api_token';
 const configCacheTtlMs = 5000;
 
 const defaultCloudflare: CloudflareConfig = {
@@ -50,6 +51,7 @@ let cloudflareCache: CacheEntry<CloudflareConfig> | null = null;
 let systemCache: CacheEntry<SystemConfig> | null = null;
 let resendCache: CacheEntry<ResendConfig> | null = null;
 let telegramCache: CacheEntry<TelegramConfig> | null = null;
+let apiTokenCache: CacheEntry<string> | null = null;
 let authCache: CacheEntry<Awaited<ReturnType<typeof readAdminKeyConfig>>> | null = null;
 
 function cacheValid<T>(entry: CacheEntry<T> | null, env: Env) {
@@ -65,7 +67,16 @@ export function clearConfigCache(env?: Env) {
   if (!env || systemCache?.env === env) systemCache = null;
   if (!env || resendCache?.env === env) resendCache = null;
   if (!env || telegramCache?.env === env) telegramCache = null;
+  if (!env || apiTokenCache?.env === env) apiTokenCache = null;
   if (!env || authCache?.env === env) authCache = null;
+}
+
+// 公开 API 专用 token（存 KV config:api_token，纯字串），与 admin 登入 key 分离、可随时更换
+export async function getApiToken(env: Env): Promise<string> {
+  if (apiTokenCache?.env === env && apiTokenCache.expiresAt > Date.now()) return apiTokenCache.value;
+  const value = String((await env.KV.get(API_TOKEN_KEY)) || '').trim();
+  apiTokenCache = cacheEntry(env, value);
+  return value;
 }
 
 export function clearAuthConfigCache(env?: Env) {

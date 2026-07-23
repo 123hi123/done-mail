@@ -45,6 +45,8 @@ interface PublicMailListQuery {
   domain?: string;
   to?: string;
   from?: string;
+  since?: string;
+  until?: string;
   hasAttachments?: boolean | null;
   includeAttachments?: boolean;
   waitUntil?: (promise: Promise<unknown>) => void;
@@ -161,7 +163,7 @@ async function listMailRows(env: Env, query: MailListQuery) {
   };
 }
 
-function pushMailFilters(where: string[], params: unknown[], query: Pick<PublicMailListQuery, 'from' | 'to' | 'domain' | 'hasAttachments'>) {
+function pushMailFilters(where: string[], params: unknown[], query: Pick<PublicMailListQuery, 'from' | 'to' | 'domain' | 'hasAttachments' | 'since' | 'until'>) {
   if (query.from) {
     where.push(`mails.from_addr = ?`);
     params.push(query.from.toLowerCase());
@@ -173,6 +175,14 @@ function pushMailFilters(where: string[], params: unknown[], query: Pick<PublicM
   if (query.domain) {
     where.push(`mails.domain = ?`);
     params.push(query.domain.toLowerCase());
+  }
+  if (query.since) {
+    where.push('mails.received_at >= ?');
+    params.push(query.since);
+  }
+  if (query.until) {
+    where.push('mails.received_at <= ?');
+    params.push(query.until);
   }
   if (query.hasAttachments !== null && query.hasAttachments !== undefined) {
     where.push('mails.has_attachments = ?');
@@ -334,6 +344,8 @@ async function listPublicMails(c: AppContext) {
   const toDomain = (c.req.query('toDomain') || '').trim().toLowerCase();
   const subject = normalizeSearchKeyword(c.req.query('subject') || '');
   const content = normalizeSearchKeyword(c.req.query('content') || '');
+  const since = (c.req.query('since') || '').trim();
+  const until = (c.req.query('until') || '').trim();
   let hasAttachments: boolean | null;
   let includeAttachments: boolean;
   try {
@@ -350,6 +362,8 @@ async function listPublicMails(c: AppContext) {
     from,
     to,
     domain: toDomain,
+    since,
+    until,
     hasAttachments,
     includeAttachments,
     waitUntil: waitUntilFromContext(c)
